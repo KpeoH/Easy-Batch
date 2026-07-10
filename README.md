@@ -26,7 +26,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone [https://github.com/your-username/EasyBatch.git](https://github.com/your-username/EasyBatch.git)
+   git clone https://github.com/KpeoH/Easy-Batch.git
    cd EasyBatch
    ```
 Установите необходимые зависимости:

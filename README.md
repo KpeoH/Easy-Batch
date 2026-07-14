@@ -29,12 +29,12 @@
    git clone https://github.com/KpeoH/Easy-Batch.git
    cd EasyBatch
    ```
-Установите необходимые зависимости:
+2. Установите необходимые зависимости:
 ```Bash
 pip install PySide6 Pillow
 ```
 
-Запустите скрипт:
+3. Запустите скрипт:
 ```Bash
 python resizer.py
 ```

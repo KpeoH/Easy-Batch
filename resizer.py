@@ -11,7 +11,7 @@ import concurrent.futures
 import copy
 from PIL import Image, ImageOps, ImageEnhance, ImageDraw
 from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QThread, QMimeData, QBuffer, QByteArray, QIODevice
-from PySide6.QtGui import QPixmap, QColor, QPainter, QPen, QAction, QDrag, QCursor, QFont, QFontMetrics, QImage, QFontDatabase, QKeySequence
+from PySide6.QtGui import QPixmap, QColor, QPainter, QPen, QAction, QDrag, QCursor, QFont, QFontMetrics, QImage, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QCheckBox, QSlider, QLineEdit, QComboBox, 
@@ -478,6 +478,139 @@ class InteractivePreview(QLabel):
         self.active_element = None
         self.drag_start_pos = None
 
+class CropOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.l, self.t, self.r, self.b = 0.1, 0.1, 0.9, 0.9
+        self.active_edge = None
+        self.setMouseTracking(True)
+        self.margin = 15
+
+    def get_px_coords(self):
+        w, h = self.width(), self.height()
+        return int(w*self.l), int(h*self.t), int(w*self.r), int(h*self.b)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        x1, y1, x2, y2 = self.get_px_coords()
+        p.fillRect(0, 0, w, y1, QColor(0, 0, 0, 160))
+        p.fillRect(0, y2, w, h-y2, QColor(0, 0, 0, 160))
+        p.fillRect(0, y1, x1, y2-y1, QColor(0, 0, 0, 160))
+        p.fillRect(x2, y1, w-x2, y2-y1, QColor(0, 0, 0, 160))
+        pen = QPen(QColor("#f66b3c"), 3, Qt.DashLine)
+        p.setPen(pen)
+        p.drawRect(x1, y1, x2-x1, y2-y1)
+
+    def mousePressEvent(self, event):
+        ex, ey = event.position().x(), event.position().y()
+        x1, y1, x2, y2 = self.get_px_coords()
+        dists = {'l': abs(ex - x1), 'r': abs(ex - x2), 't': abs(ey - y1), 'b': abs(ey - y2)}
+        closest = min(dists, key=dists.get)
+        if dists[closest] < self.margin: self.active_edge = closest
+
+    def mouseMoveEvent(self, event):
+        ex, ey = event.position().x(), event.position().y()
+        x1, y1, x2, y2 = self.get_px_coords()
+        if not self.active_edge:
+            if abs(ex - x1) < self.margin or abs(ex - x2) < self.margin: self.setCursor(Qt.SizeHorCursor)
+            elif abs(ey - y1) < self.margin or abs(ey - y2) < self.margin: self.setCursor(Qt.SizeVerCursor)
+            else: self.setCursor(Qt.ArrowCursor)
+            return
+        w, h = self.width(), self.height()
+        nx, ny = max(0, min(ex, w)), max(0, min(ey, h))
+        nl, nt, nr, nb = nx / w, ny / h, nx / w, ny / h
+        if self.active_edge == 'l' and nl < self.r - 0.05: self.l = nl
+        elif self.active_edge == 'r' and nr > self.l + 0.05: self.r = nr
+        elif self.active_edge == 't' and nt < self.b - 0.05: self.t = nt
+        elif self.active_edge == 'b' and nb > self.t + 0.05: self.b = nb
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.active_edge = None
+
+class CropDialog(DraggableDialog):
+    def __init__(self, img_path, coords, parent=None):
+        super().__init__(parent)
+        self.resize(900, 750)
+        self.img_path = img_path
+        main_frame = QFrame(self)
+        main_frame.setObjectName("DialogCard")
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0,0,0,0)
+        self.layout.addWidget(main_frame)
+        frame_layout = QVBoxLayout(main_frame)
+        title_lbl = QLabel("Обрезка фото")
+        title_lbl.setObjectName("Title")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title_lbl)
+        self.view_container = QWidget()
+        self.view_layout = QVBoxLayout(self.view_container)
+        self.view_layout.setContentsMargins(0,0,0,0)
+        self.view_layout.setAlignment(Qt.AlignCenter)
+        self.img_lbl = QLabel()
+        self.img_lbl.setAlignment(Qt.AlignCenter)
+        self.view_layout.addWidget(self.img_lbl)
+        frame_layout.addWidget(self.view_container, 1)
+        btn_layout = QHBoxLayout()
+        btn_apply = QPushButton("Применить")
+        btn_save_tpl = QPushButton("Сохранить шаблон")
+        btn_save_tpl.setObjectName("Secondary")
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("Secondary")
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_save_tpl)
+        btn_layout.addWidget(btn_apply)
+        frame_layout.addLayout(btn_layout)
+        btn_apply.clicked.connect(self.accept)
+        btn_save_tpl.clicked.connect(self.save_template)
+        btn_cancel.clicked.connect(self.reject)
+
+        try:
+            self.original_img = Image.open(img_path)
+            self.display_img = self.original_img.copy()
+            self.display_img.thumbnail((850, 600), Image.Resampling.LANCZOS)
+            self.pixmap = pil_to_pixmap(self.display_img)
+            self.img_lbl.setFixedSize(self.pixmap.size())
+            self.img_lbl.setPixmap(self.pixmap)
+            self.overlay = CropOverlay(self.img_lbl)
+            self.overlay.resize(self.img_lbl.size())
+            self.scale_x = self.original_img.width / self.display_img.width
+            self.scale_y = self.original_img.height / self.display_img.height
+        except Exception: pass
+
+        if coords:
+            self.overlay.l = coords[0] / self.original_img.width
+            self.overlay.t = coords[1] / self.original_img.height
+            self.overlay.r = coords[2] / self.original_img.width
+            self.overlay.b = coords[3] / self.original_img.height
+        else:
+            guides = self.load_crop_config()
+            self.overlay.l, self.overlay.r, self.overlay.t, self.overlay.b = guides['left'], guides['right'], guides['top'], guides['bottom']
+
+    def load_crop_config(self):
+        if os.path.exists(CROP_CONFIG_FILE):
+            try:
+                with open(CROP_CONFIG_FILE, 'r') as f: return json.load(f)
+            except Exception: pass
+        return {'left': 0.1, 'right': 0.9, 'top': 0.1, 'bottom': 0.9}
+
+    def save_template(self):
+        guides = {'left': self.overlay.l, 'right': self.overlay.r, 'top': self.overlay.t, 'bottom': self.overlay.b}
+        try:
+            with open(CROP_CONFIG_FILE, 'w') as f: json.dump(guides, f)
+            CustomMsgBox(self, "Сохранено", "Позиции направляющих сохранены по умолчанию").exec()
+        except Exception: pass
+
+    def get_result(self):
+        return (
+            int(self.overlay.l * self.display_img.width * self.scale_x),
+            int(self.overlay.t * self.display_img.height * self.scale_y),
+            int(self.overlay.r * self.display_img.width * self.scale_x),
+            int(self.overlay.b * self.display_img.height * self.scale_y)
+        )
+
 class SuccessBox(DraggableDialog):
     def __init__(self, parent, title, message, out_dir):
         super().__init__(parent)
@@ -610,7 +743,7 @@ class FileRow(QFrame):
         self.cb_fill = QCheckBox("Без полей")
         self.cb_fill.setChecked(fill_checked)
         rl.addWidget(self.cb_fill)
-        self.btn_crop = QPushButton("Кроп")
+        self.btn_crop = QPushButton("Обрезка")
         rl.addWidget(self.btn_crop)
         self.btn_up = QPushButton("▲")
         self.btn_up.setObjectName("Secondary")
@@ -620,10 +753,9 @@ class FileRow(QFrame):
         self.btn_down.setObjectName("Secondary")
         self.btn_down.setFixedWidth(40)
         rl.addWidget(self.btn_down)
-        self.btn_del = QPushButton("✕")
+        self.btn_del = QPushButton("Удалить")
         self.btn_del.setObjectName("Danger")
-        self.btn_del.setFixedSize(32, 32)
-        self.btn_del.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.btn_del.setFixedHeight(32)
         rl.addWidget(self.btn_del)
 
     def mousePressEvent(self, event):
@@ -767,14 +899,15 @@ class TitleBar(QFrame):
         layout.addWidget(lbl)
         layout.addStretch()
         
-        self.btn_history = QPushButton("↺ История")
+        self.btn_history = QPushButton("История")
         self.btn_history.setToolTip("История изменений")
         self.btn_min = QPushButton("—")
         self.btn_max = QPushButton("🗖")
         self.btn_close = QPushButton("✕")
         
         self.btn_history.setObjectName("TitleBtn")
-        self.btn_history.setFixedSize(110, 40)
+        self.btn_history.setFixedHeight(40)
+        self.btn_history.setMinimumWidth(100)
         layout.addWidget(self.btn_history)
         
         for b in (self.btn_min, self.btn_max, self.btn_close):
@@ -937,6 +1070,7 @@ class App(QMainWindow):
         self.load_cover_state(self.cover_cfg_data)
         self.refresh_wm_list()
         self.refresh_banners_list_ui()
+        self.refresh_md_list_ui()
         self.refresh_file_list_ui()
         self.push_history("Исходное состояние")
 
@@ -956,7 +1090,12 @@ class App(QMainWindow):
 
     def push_history(self, action_name="Изменение"):
         if self._is_undoing: return
-        state = {"cover": copy.deepcopy(self.get_cover_state()), "wm": copy.deepcopy(self.watermarks_config)}
+        state = {
+            "cover": copy.deepcopy(self.get_cover_state()), 
+            "wm": copy.deepcopy(self.watermarks_config),
+            "crop": copy.deepcopy(self.crop_data),
+            "fill": copy.deepcopy(self.fill_settings)
+        }
         self._history = self._history[:self._history_ptr + 1]
         self._history.append({"state": state, "name": action_name})
         if len(self._history) > 30: self._history.pop(0)
@@ -1001,6 +1140,18 @@ class App(QMainWindow):
         self._is_undoing = True
         self.watermarks_config = copy.deepcopy(state["wm"])
         self.load_cover_state(state["cover"])
+        self.crop_data = copy.deepcopy(state.get("crop", {}))
+        self.fill_settings = copy.deepcopy(state.get("fill", {}))
+        self._cached_orig_path = None
+        
+        for i in range(self.files_layout.count()):
+            w = self.files_layout.itemAt(i).widget()
+            if isinstance(w, FileRow):
+                path = w.file_path
+                w.cb_fill.blockSignals(True)
+                w.cb_fill.setChecked(self.fill_settings.get(path, False))
+                w.cb_fill.blockSignals(False)
+
         if self.current_wm_edit and self.current_wm_edit in self.watermarks_config: self.edit_wm(self.current_wm_edit)
         else: self.refresh_wm_list()
         self._is_undoing = False
@@ -1019,13 +1170,14 @@ class App(QMainWindow):
         return 0, 0
 
     def set_element_offset(self, key, nx, ny, live=False):
+        self._is_switching = True
         if key == "transform":
             self.sl_img_x.setValue(int(nx))
             self.sl_img_y.setValue(int(ny))
             t = self.get_cover_targets()
             if t:
                 path = t[self.current_cover_preview_idx % len(t)]
-                vals = {"scale": self.sl_img_sc.value(), "x": self.sl_img_x.value(), "y": self.sl_img_y.value()}
+                vals = {"scale": self.sl_img_sc.value(), "x": int(nx), "y": int(ny)}
                 if self.cb_individual.isChecked(): self.individual_transforms[path] = vals
                 else: self.global_transform = vals
         elif key == "banner": self.sl_ban_x.setValue(int(nx)); self.sl_ban_y.setValue(int(ny))
@@ -1040,6 +1192,7 @@ class App(QMainWindow):
                 self.watermarks_config[name]["dy"] = int(ny)
                 if self.current_wm_edit == name:
                     self.sl_wm_dx.setValue(int(nx)); self.sl_wm_dy.setValue(int(ny))
+        self._is_switching = False
         
         if live:
             self.render_cover_preview(fast_mode=True)
@@ -1059,12 +1212,13 @@ class App(QMainWindow):
 
     def set_element_scale(self, key, scale, live=False):
         scale = int(max(1, min(300, scale)))
+        self._is_switching = True
         if key == "transform":
             self.sl_img_sc.setValue(scale)
             t = self.get_cover_targets()
             if t:
                 path = t[self.current_cover_preview_idx % len(t)]
-                vals = {"scale": self.sl_img_sc.value(), "x": self.sl_img_x.value(), "y": self.sl_img_y.value()}
+                vals = {"scale": scale, "x": self.sl_img_x.value(), "y": self.sl_img_y.value()}
                 if self.cb_individual.isChecked(): self.individual_transforms[path] = vals
                 else: self.global_transform = vals
         elif key == "banner": self.sl_ban_sc.setValue(scale)
@@ -1076,6 +1230,7 @@ class App(QMainWindow):
             if name in self.watermarks_config:
                 self.watermarks_config[name]["scale"] = scale
                 if self.current_wm_edit == name: self.sl_wm_sc.setValue(scale)
+        self._is_switching = False
 
         if live:
             self.render_cover_preview(fast_mode=True)
@@ -1098,7 +1253,9 @@ class App(QMainWindow):
             if p not in self.files:
                 self.files.append(p)
                 added_paths.append(p)
-        if added_paths: self.add_files_to_ui_async(added_paths)
+        if added_paths: 
+            self.add_files_to_ui_async(added_paths)
+            self.push_history("Добавление файлов")
 
     def closeEvent(self, event):
         self.save_general_config()
@@ -1152,11 +1309,6 @@ class App(QMainWindow):
 
     def save_cover_config(self):
         data = self.get_cover_state()
-        data["global_transform"] = self.global_transform
-        data["individual_transforms"] = self.individual_transforms
-        data["global_price"] = self.global_price
-        data["individual_prices"] = self.individual_prices
-        data["price_color_hex"] = self.price_color_hex
         try:
             with open(COVER_CONFIG_FILE, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception: pass
@@ -1285,7 +1437,7 @@ class App(QMainWindow):
         left_bot_layout.addWidget(copyright_lbl)
         bot_layout.addLayout(left_bot_layout)
         
-        bot_layout.addStretch()
+        bot_layout.addSpacing(30)
         
         right_bot_layout = QVBoxLayout()
         right_bot_layout.setSpacing(5)
@@ -1295,10 +1447,12 @@ class App(QMainWindow):
         self.progress_bar.setTextVisible(False)
         self.btn_process = QPushButton("ОБРАБОТАТЬ ФОТО")
         self.btn_process.setMinimumHeight(45)
+        self.btn_process.setMinimumWidth(200)
+        self.btn_process.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_process.clicked.connect(self.process_images)
         right_bot_layout.addWidget(self.progress_bar)
         right_bot_layout.addWidget(self.btn_process)
-        bot_layout.addLayout(right_bot_layout, 2)
+        bot_layout.addLayout(right_bot_layout, 1)
         
         main_layout.addWidget(bot_widget)
         win_layout.addWidget(self.app_frame)
@@ -1460,16 +1614,17 @@ class App(QMainWindow):
         self.fill_settings[path] = checked
         self.render_out_preview()
         self.render_wm_preview()
-        self.push_history("Без полей")
+        self.push_history("Изменение режима Без полей")
 
     def open_crop(self, path):
         dlg = CropDialog(path, self.crop_data.get(path), self)
         if dlg.exec():
             self.crop_data[path] = dlg.get_result()
+            if self._cached_orig_path == path: self._cached_orig_path = None
             self.render_out_preview()
             self.request_cover_preview(150)
             self.render_wm_preview()
-            self.push_history("Кадрирование")
+            self.push_history("Обрезка")
 
     def move_file(self, path, dir):
         idx = self.files.index(path)
@@ -1560,9 +1715,9 @@ class App(QMainWindow):
         self.cb_individual = QCheckBox("Индивидуально для этого фото")
         self.cb_individual.toggled.connect(self.on_individual_toggle)
         b_prod.content_layout.addWidget(self.cb_individual)
-        self.sl_img_sc, self.e_img_sc = self.create_slider_row(b_prod.content_layout, "Масштаб %:", 10, 300)
-        self.sl_img_x, self.e_img_x = self.create_slider_row(b_prod.content_layout, "Позиция X:", -1000, 1000)
-        self.sl_img_y, self.e_img_y = self.create_slider_row(b_prod.content_layout, "Позиция Y:", -1000, 1000)
+        self.sl_img_sc, self.e_img_sc = self.create_slider_row(b_prod.content_layout, "Масштаб %:", 10, 300, command=self._on_transform_change)
+        self.sl_img_x, self.e_img_x = self.create_slider_row(b_prod.content_layout, "Позиция X:", -1000, 1000, command=self._on_transform_change)
+        self.sl_img_y, self.e_img_y = self.create_slider_row(b_prod.content_layout, "Позиция Y:", -1000, 1000, command=self._on_transform_change)
         btn_rst_prod = QPushButton("Сбросить товар")
         btn_rst_prod.setObjectName("Secondary")
         btn_rst_prod.clicked.connect(self.reset_product_transform)
@@ -1614,28 +1769,32 @@ class App(QMainWindow):
         self.cb_individual_price.toggled.connect(self.on_individual_price_toggle)
         b_md.content_layout.addWidget(self.cb_individual_price)
 
-        md_lr = QHBoxLayout()
-        btn_sel_md = QPushButton("Выбрать Лого")
-        btn_del_md = QPushButton("Удалить")
-        btn_del_md.setObjectName("Danger")
-        self.lbl_md_name = QLabel("")
-        btn_sel_md.clicked.connect(self.select_md_logo)
-        btn_del_md.clicked.connect(self.clear_md_logo)
-        md_lr.addWidget(btn_sel_md); md_lr.addWidget(btn_del_md); md_lr.addWidget(self.lbl_md_name)
-        b_md.content_layout.addLayout(md_lr)
+        btn_add_md = QPushButton("Выбрать картинку уценки")
+        btn_add_md.clicked.connect(self.add_md_logo)
+        b_md.content_layout.addWidget(btn_add_md)
+        self.md_list_widget = QVBoxLayout()
+        b_md.content_layout.addLayout(self.md_list_widget)
+        self.active_md_logo = ""
+        self.md_logos_list = []
 
-        self.sl_md_sc, self.e_md_sc = self.create_slider_row(b_md.content_layout, "Масштаб лого:", 10, 300)
-        self.sl_md_x, self.e_md_x = self.create_slider_row(b_md.content_layout, "X (лого):", -1000, 1000)
-        self.sl_md_y, self.e_md_y = self.create_slider_row(b_md.content_layout, "Y (лого):", -1000, 1000)
+        self.sl_md_sc, self.e_md_sc = self.create_slider_row(b_md.content_layout, "Масштаб значка:", 10, 300)
+        self.sl_md_x, self.e_md_x = self.create_slider_row(b_md.content_layout, "Позиция X:", -1000, 1000)
+        self.sl_md_y, self.e_md_y = self.create_slider_row(b_md.content_layout, "Позиция Y:", -1000, 1000)
+        btn_rst_md = QPushButton("Сбросить значок")
+        btn_rst_md.setObjectName("Secondary")
+        btn_rst_md.clicked.connect(lambda: (self.sl_md_sc.setValue(100), self.sl_md_x.setValue(0), self.sl_md_y.setValue(0), self.push_history("Сброс значка уценки")))
+        b_md.content_layout.addWidget(btn_rst_md)
 
         pr_r = QHBoxLayout()
         pr_r.addWidget(QLabel("Новая:"))
         self.e_pr_new = QLineEdit("9990")
         self.e_pr_new.textChanged.connect(self._on_price_change)
+        self.e_pr_new.editingFinished.connect(lambda: self.push_history("Изменение цены"))
         pr_r.addWidget(self.e_pr_new)
         pr_r.addWidget(QLabel("Старая:"))
         self.e_pr_old = QLineEdit("14990")
         self.e_pr_old.textChanged.connect(self._on_price_change)
+        self.e_pr_old.editingFinished.connect(lambda: self.push_history("Изменение цены"))
         pr_r.addWidget(self.e_pr_old)
         b_md.content_layout.addLayout(pr_r)
 
@@ -1766,10 +1925,9 @@ class App(QMainWindow):
             lbl = QLabel(f if len(f)<18 else f[:15]+"...")
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             l.addWidget(lbl)
-            btn_del = QPushButton("X")
+            btn_del = QPushButton("Удалить")
             btn_del.setObjectName("Danger")
-            btn_del.setFixedSize(32, 32)
-            btn_del.setStyleSheet("font-size: 16px; font-weight: bold;")
+            btn_del.setFixedHeight(32)
             btn_del.clicked.connect(lambda _, name=f: self.delete_banner(name))
             l.addWidget(btn_del)
             self.ban_list_widget.addWidget(row)
@@ -1781,7 +1939,7 @@ class App(QMainWindow):
         self.push_history("Переключение плашки")
 
     def delete_banner(self, name):
-        self.banners_list.remove(name)
+        if name in self.banners_list: self.banners_list.remove(name)
         if self.active_banner == name: self.active_banner = ""
         self.refresh_banners_list_ui()
         self.request_cover_preview(150)
@@ -1802,18 +1960,62 @@ class App(QMainWindow):
         self.request_cover_preview(150)
         self.push_history("Удаление логотипа")
 
-    def select_md_logo(self):
-        p = native_askopenfilename(title="Выберите логотип уценки")
-        if p:
-            f = os.path.basename(p)
-            try: shutil.copy(p, os.path.join(ASSETS_DIR, f))
+    def add_md_logo(self):
+        paths = native_askopenfilenames(title="Выберите значок уценки")
+        if not paths: return
+        for path in paths:
+            filename = os.path.basename(path)
+            dest = os.path.join(ASSETS_DIR, filename)
+            try: shutil.copy(path, dest)
             except Exception: pass
-            self.lbl_md_name.setText(f)
-            self.request_cover_preview(150)
-            self.push_history("Выбор значка уценки")
+            if filename not in self.md_logos_list: self.md_logos_list.append(filename)
+        self.save_cover_config()
+        self.refresh_md_list_ui()
+        self.request_cover_preview(150)
+        self.push_history("Добавление значка уценки")
 
-    def clear_md_logo(self):
-        self.lbl_md_name.setText("")
+    def refresh_md_list_ui(self):
+        while self.md_list_widget.count():
+            w = self.md_list_widget.takeAt(0).widget()
+            if w: w.deleteLater()
+        for f in self.md_logos_list:
+            row = QFrame()
+            row.setObjectName("Card")
+            l = QHBoxLayout(row)
+            l.setContentsMargins(5, 5, 5, 5)
+            cb = QCheckBox()
+            cb.setChecked(f == self.active_md_logo)
+            cb.toggled.connect(lambda c, name=f: self.select_md_logo(name, c))
+            l.addWidget(cb)
+            thumb = QLabel()
+            thumb.setFixedSize(40, 40)
+            thumb.setAlignment(Qt.AlignCenter)
+            try:
+                img = Image.open(get_asset_path(f))
+                img.thumbnail((40, 40))
+                thumb.setPixmap(pil_to_pixmap(img))
+            except Exception: pass
+            l.addWidget(thumb)
+            lbl = QLabel(f if len(f)<18 else f[:15]+"...")
+            lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            l.addWidget(lbl)
+            btn_del = QPushButton("Удалить")
+            btn_del.setObjectName("Danger")
+            btn_del.setFixedHeight(32)
+            btn_del.clicked.connect(lambda _, name=f: self.delete_md_logo(name))
+            l.addWidget(btn_del)
+            self.md_list_widget.addWidget(row)
+
+    def select_md_logo(self, name, checked):
+        self.active_md_logo = name if checked else ""
+        self.refresh_md_list_ui()
+        self.request_cover_preview(150)
+        self.push_history("Переключение значка уценки")
+
+    def delete_md_logo(self, name):
+        if name in self.md_logos_list: self.md_logos_list.remove(name)
+        if self.active_md_logo == name: self.active_md_logo = ""
+        self.refresh_md_list_ui()
         self.request_cover_preview(150)
         self.push_history("Удаление значка уценки")
 
@@ -1924,12 +2126,13 @@ class App(QMainWindow):
             "target_indices": self.entry_target_indices.text(),
             "banners_list": self.banners_list,
             "active_banner": self.active_banner,
+            "md_logos_list": self.md_logos_list,
+            "active_md_logo": self.active_md_logo,
             "individual_price_active": self.cb_individual_price.isChecked(),
             "banner_scale": self.sl_ban_sc.value(), "banner_x": self.sl_ban_x.value(), "banner_y": self.sl_ban_y.value(),
             "top_logo": self.lbl_logo_name.text(),
             "logo_scale": self.sl_logo_sc.value(), "logo_x": self.sl_logo_x.value(), "logo_y": self.sl_logo_y.value(),
             "show_markdown": self.cb_md_active.isChecked(),
-            "markdown_logo": self.lbl_md_name.text(),
             "md_logo_scale": self.sl_md_sc.value(), "md_logo_x": self.sl_md_x.value(), "md_logo_y": self.sl_md_y.value(),
             "price_font_str": self.price_font_str,
             "price_font_display": self.lbl_price_font.text(),
@@ -1938,7 +2141,11 @@ class App(QMainWindow):
             "price_new_x": self.sl_pr_nx.value(), "price_new_y": self.sl_pr_ny.value(),
             "price_old_x": self.sl_pr_ox.value(), "price_old_y": self.sl_pr_oy.value(),
             "strike_width": self.sl_str_w.value(),
-            "price_letter_spacing": self.sl_pr_space.value()
+            "price_letter_spacing": self.sl_pr_space.value(),
+            "global_transform": copy.deepcopy(self.global_transform),
+            "individual_transforms": copy.deepcopy(self.individual_transforms),
+            "global_price": copy.deepcopy(self.global_price),
+            "individual_prices": copy.deepcopy(self.individual_prices)
         }
 
     def load_cover_state(self, d):
@@ -1953,7 +2160,10 @@ class App(QMainWindow):
         self.lbl_logo_name.setText(d.get("top_logo", ""))
         self.sl_logo_sc.setValue(d.get("logo_scale", 100)); self.sl_logo_x.setValue(d.get("logo_x", 0)); self.sl_logo_y.setValue(d.get("logo_y", 0))
         self.cb_md_active.setChecked(d.get("show_markdown", False))
-        self.lbl_md_name.setText(d.get("markdown_logo", ""))
+        
+        self.md_logos_list = d.get("md_logos_list", [])
+        self.active_md_logo = d.get("active_md_logo", "")
+
         self.sl_md_sc.setValue(d.get("md_logo_scale", 100)); self.sl_md_x.setValue(d.get("md_logo_x", 0)); self.sl_md_y.setValue(d.get("md_logo_y", 0))
         
         self.price_font_str = d.get("price_font_str", "")
@@ -1961,7 +2171,6 @@ class App(QMainWindow):
         self.price_color_hex = d.get("price_color_hex", "#B40000")
         self.btn_price_color.setStyleSheet(f"background-color: {self.price_color_hex}; border-radius: 4px; border: 1px solid #888;")
         
-        # ВАЖНО: Восстанавливаем словарь общих трансформаций
         self.global_transform = d.get("global_transform", {"scale": 100, "x": 0, "y": 0})
         self.individual_transforms = d.get("individual_transforms", {})
         self.global_price = d.get("global_price", {"new": "9990", "old": "14990"})
@@ -2195,24 +2404,28 @@ class App(QMainWindow):
             row = QFrame()
             row.setObjectName("ActiveCard" if self.current_wm_edit == f else "Card")
             l = QHBoxLayout(row)
+            l.setContentsMargins(5, 5, 5, 5)
             cb = QCheckBox()
             cb.blockSignals(True)
             cb.setChecked(cfg.get("active", False))
             cb.blockSignals(False)
             cb.toggled.connect(lambda c, name=f: self.toggle_wm_active(name, c))
+            l.addWidget(cb)
             lbl = QLabel(f if len(f)<15 else f[:12]+"...")
             lbl.setStyleSheet("font-weight: bold; background: transparent;")
+            l.addWidget(lbl)
+            l.addStretch()
             btn_edit = QPushButton("Настроить")
             btn_edit.setFixedWidth(110)
             if self.current_wm_edit == f: btn_edit.setStyleSheet(f"background-color: {THEMES[self.current_theme]['ACCENT']}; color: {THEMES[self.current_theme]['BG']};")
             else: btn_edit.setObjectName("Secondary")
             btn_edit.clicked.connect(lambda _, name=f: self.edit_wm(name))
-            btn_del = QPushButton("X")
+            l.addWidget(btn_edit)
+            btn_del = QPushButton("Удалить")
             btn_del.setObjectName("Danger")
-            btn_del.setFixedSize(32, 32)
-            btn_del.setStyleSheet("font-size: 16px; font-weight: bold;")
+            btn_del.setFixedHeight(32)
             btn_del.clicked.connect(lambda _, name=f: self.delete_wm(name))
-            l.addWidget(cb); l.addWidget(lbl); l.addStretch(); l.addWidget(btn_edit); l.addWidget(btn_del)
+            l.addWidget(btn_del)
             self.wm_layout.addWidget(row)
 
     def toggle_wm_active(self, name, checked):
@@ -2247,8 +2460,7 @@ class App(QMainWindow):
         
         if is_text:
             self.e_wm_text.setText(c.get("text", ""))
-            hex_c = c.get("color_hex")
-            if not hex_c: hex_c = "#000000" if c.get("color", "Черный") == "Черный" else "#ffffff"
+            hex_c = c.get("color_hex", "#000000")
             self.wm_color_hex = hex_c
             self.btn_wm_color.setStyleSheet(f"background-color: {self.wm_color_hex}; border-radius: 4px; border: 1px solid #888;")
             self.wm_font_str = c.get("font_str", "")
@@ -2355,7 +2567,7 @@ class App(QMainWindow):
         self.e_new_size = QLineEdit()
         self.e_new_size.setPlaceholderText("800x800")
         btn_add_sz = QPushButton("+")
-        btn_del_sz = QPushButton("X")
+        btn_del_sz = QPushButton("Удалить")
         btn_del_sz.setObjectName("Danger")
         btn_add_sz.clicked.connect(self.add_size)
         btn_del_sz.clicked.connect(self.del_size)
@@ -2439,6 +2651,8 @@ class App(QMainWindow):
 
     def build_final_image(self, path, mode="regular", pre_state=None, target_size_text=None, fast_mode=False):
         state = pre_state if pre_state else self.get_cover_state()
+        wm_state = state.get("wm", self.watermarks_config)
+        
         if mode == "cover": t_size = (1200, 900)
         else: 
             sz_txt = target_size_text if target_size_text else self.cb_sizes.currentText()
@@ -2457,13 +2671,13 @@ class App(QMainWindow):
                     orig = img.convert("RGBA")
                     if path in self.crop_data:
                         c = self.crop_data[path]
-                        orig = orig.crop((max(0, c[0]), max(0, c[1]), min(img.width, c[2]), min(img.height, c[3])))
+                        orig = orig.crop((max(0, int(c[0])), max(0, int(c[1])), min(img.width, int(c[2])), min(img.height, int(c[3]))))
                 self._cached_orig_path = path
                 self._cached_crop = self.crop_data.get(path)
                 self._cached_orig_img = orig.copy()
                 
             if mode == "cover":
-                tr = self.individual_transforms.get(path, self.global_transform)
+                tr = state["individual_transforms"].get(path, state["global_transform"])
                 sc, dx, dy = tr["scale"]/100.0, tr["x"], tr["y"]
                 ban = None
                 if state["active_banner"]:
@@ -2509,8 +2723,8 @@ class App(QMainWindow):
 
                 if state["show_markdown"]:
                     bp = 40
-                    if state["markdown_logo"]:
-                        mp = get_asset_path(state["markdown_logo"])
+                    if state["active_md_logo"]:
+                        mp = get_asset_path(state["active_md_logo"])
                         if os.path.exists(mp):
                             md = Image.open(mp).convert("RGBA")
                             bh = 150
@@ -2534,8 +2748,8 @@ class App(QMainWindow):
                     
                     l_spacing = state.get("price_letter_spacing", 0)
                     
-                    if state.get("individual_price_active", False) and path in self.individual_prices: price_data = self.individual_prices[path]
-                    else: price_data = self.global_price
+                    if state.get("individual_price_active", False) and path in state["individual_prices"]: price_data = state["individual_prices"][path]
+                    else: price_data = state["global_price"]
                         
                     p_new = price_data.get("new", "")
                     p_old = price_data.get("old", "")
@@ -2570,7 +2784,7 @@ class App(QMainWindow):
                 else: res = ImageOps.pad(orig, t_size, method=resample_filter, color=(255, 255, 255, 255))
                 canvas.paste(res, (0,0), res)
                 
-                for wname, cfg in self.watermarks_config.items():
+                for wname, cfg in wm_state.items():
                     if not cfg.get("active", False): continue
                     is_text = cfg.get("type") == "text"
                     grid = cfg.get("grid", False)
@@ -2662,6 +2876,7 @@ class App(QMainWindow):
             CustomMsgBox(self, "Пусто", "Добавьте фото для обработки").exec()
             return
         st = self.get_cover_state()
+        st["wm"] = self.watermarks_config
         use_c = self.lbl_out_dir.text() != "Рядом с оригиналом"
         has_wm = any(c.get("active", False) for c in self.watermarks_config.values())
         pref = self.e_prefix.text().strip()

@@ -2,6 +2,12 @@
 
 Десктопное приложение для многопоточной пакетной обработки изображений. Инструмент предназначен для автоматизации рутинных задач по подготовке визуального контента: интеллектуальный ресайз, наложение водяных знаков, кроп и генерация обложек с метаданными.
 
+<img width="1920" height="1052" alt="image" src="https://github.com/user-attachments/assets/8398b9d8-b655-4f39-8753-a3bbfecbe113" />
+<img width="1920" height="1048" alt="image" src="https://github.com/user-attachments/assets/8ad1435f-8299-4701-affb-3f569c36bfd2" />
+<img width="1280" height="694" alt="image" src="https://github.com/user-attachments/assets/fa852858-673c-4124-ab84-b19190aa8c68" />
+<img width="1920" height="1048" alt="image" src="https://github.com/user-attachments/assets/32969891-ee29-4830-94be-2b1413278753" />
+
+
 ## Основной функционал
 
 * **Пакетная обработка:** Асинхронный экспорт файлов с использованием `concurrent.futures.ThreadPoolExecutor`. Обеспечивает утилизацию всех ядер CPU и предотвращает блокировку основного потока UI при работе с большими объемами данных.

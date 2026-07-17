@@ -65,3 +65,6 @@ python resizer.py
 - **Пиковая ОЗУ в процессе:** 4210.04 MB (Прирост: +1659.86 MB)
 
 ==================================================
+
+<img width="343" height="185" alt="image" src="https://github.com/user-attachments/assets/98e280e3-aa72-457f-8f72-f8070e72a2c4" />
+
